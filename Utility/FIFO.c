@@ -197,6 +197,7 @@ uint8_t numOfUnpairedBrace = 0;									//未匹配括号数量，此处通过Json中的左右大
 uint16_t JsonBufferPtr = 0;
 uint8_t continueRead = 0;												//是否继续接收
 uint16_t time2_cnt = 0;													//定时器2 counter，一秒加1，判断接收是否超时使用
+uint16_t RetryTime = 31;													//尝试初始化DTU时间间隔counter
 extern FIFOTYPE *uartFIFO;
 extern TIM_HandleTypeDef htim2;
 
@@ -213,6 +214,8 @@ void init_Json_Buffer(){
 	numOfUnpairedBrace = 0;
 	JsonBufferPtr = 0;
 }
+
+
 // **************************************************************
 // Function: HAL_TIM_PeriodElapsedCallback
 // Parameters: TIM pointer
@@ -223,6 +226,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	if (htim->Instance == htim2.Instance)
 	{
+		RetryTime++;
+		//printf("%d\r\n",RetryTime);
+		if(RetryTime > 600){
+			RetryTime = 31;
+		}
 		time2_cnt++;
     if (continueRead) 
     {

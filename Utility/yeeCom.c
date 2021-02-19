@@ -104,16 +104,55 @@ HAL_StatusTypeDef SendAtCommand(char* command){
 	}
 }
 
+
+HAL_StatusTypeDef EstablishMqttConnection(const char* ProductKey,const char* DeviceName,const char* DeviceSecret){
+		
+		static uint8_t SuccessInit = 0;
+			
+		if(SuccessInit){
+			return HAL_OK;
+		}
+	
+		//配置MCQTT连接
+		if(checkDtuStatu() == HAL_ERROR){																	//检查DTU是否注册上网络
+			SuccessInit = 0;
+			return HAL_ERROR;
+		}
+		if(initDtu(ProductKey,DeviceName,DeviceSecret) == HAL_ERROR){			//配置DTU mqtt连接信息
+			SuccessInit = 0;
+			return HAL_ERROR;
+		}
+		if(checkConnection() == HAL_ERROR){																//判断DTU是否连接上阿里云
+			SuccessInit = 0;
+			return HAL_ERROR;
+		}	
+		
+		SuccessInit = 1;
+		FIFO_Clear(uartFIFO,0);																//清空DTU串口接收FIFO
+		HAL_Delay(1000);	
+		
+		#ifdef debug
+		printf("===================\r\n");
+		printf("Init connection success\r\n");
+		printf("===================\r\n");
+		#endif
+		
+		return HAL_OK;
+}
+
+
+
 // **************************************************************
 // Function: checkDtuStatu
 // Parameters:  None
-// Return:HAL_OK，未注册上网络则在此处卡死
+// Return:HAL_OK，5次未注册上网络则则HAL_ERROR
 // Description: 判断DTU是否开机完成，注册上网络
 // **************************************************************
 HAL_StatusTypeDef checkDtuStatu(){
 	const uint8_t Response_len = 50;
 	char DtuResponse[Response_len];
-	while(1){
+	uint8_t i = 0;
+	for(i = 0;i < 5;i++){
 		memset(DtuResponse,0,sizeof(DtuResponse));
 		FIFO_Clear(uartFIFO,0);
 		HAL_UART_Transmit(&YComUart, (uint8_t *)"AT*REG?", (uint16_t)strlen("AT*REG?"), 500);
@@ -128,18 +167,19 @@ HAL_StatusTypeDef checkDtuStatu(){
 			return HAL_OK;
 		}
 	}
-	
+	return HAL_ERROR;
 }
 // **************************************************************
 // Function: checkDtuStatu
 // Parameters:  None
-// Return:HAL_OK，未连接上aliyun则在此处卡死
+// Return:HAL_OK，5次未连接上aliyun则HAL_ERROR
 // Description: 判断DTU是否连接上阿里云
 // **************************************************************
 HAL_StatusTypeDef checkConnection(){
 	const uint8_t Response_len = 50;
 	char DtuResponse[Response_len];
-	while(1){
+	uint8_t i = 0;
+	for(i = 0;i < 5;i++){
 		memset(DtuResponse,0,sizeof(DtuResponse));
 		FIFO_Clear(uartFIFO,0);
 		HAL_UART_Transmit(&YComUart, (uint8_t *)"AT*GSTATE?", (uint16_t)strlen("AT*GSTATE?"), 500);
@@ -154,7 +194,7 @@ HAL_StatusTypeDef checkConnection(){
 			return HAL_OK;
 		}
 	}
-	
+	return HAL_ERROR;
 }
 // **************************************************************
 // Function: SendMessageToAliIOT

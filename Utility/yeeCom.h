@@ -7,6 +7,9 @@
 #define YComUart huart1	
 extern UART_HandleTypeDef YComUart;						//封装板子和DTU的连接串口
 
+
+HAL_StatusTypeDef EstablishMqttConnection(const char* ProductKey,const char* DeviceName,const char* DeviceSecret);
+
 // Description: 判断DTU是否开机完成，注册上网络
 HAL_StatusTypeDef checkDtuStatu(void );
 // Description: DTU mqtt连接信息配置

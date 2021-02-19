@@ -470,6 +470,7 @@ char receive_command[100];																					//抽取下发Json中的控制指令缓存
 const char* productKey = "g34tzHdyy7Z";															//阿里云三元组productKey
 const char* deviceName = "P0000001";																//阿里云三元组deviceName
 const char* deviceSecret = "1513a690b37f87f7e18e5e9e149107dd";			//阿里云三元组deviceSecret
+extern uint16_t RetryTime;																					//尝试初始化DTU时间间隔counter
 /* USER CODE END 0 */
 
 /**
@@ -610,10 +611,6 @@ int main(void)
 		sysclock = HAL_RCC_GetSysClockFreq();
 		printf("\r\nsysclock: %d\r\n",sysclock);
 		
-		//配置MCU连接
-		checkDtuStatu();															//检查DTU是否注册上网络
-		initDtu(productKey,deviceName,deviceSecret);	//配置DTU mqtt连接信息
-		checkConnection();														//判断DTU是否连接上阿里云
 		
 		//临时变量，存储进气压力，出水压力，进水阀角度，出水阀角度，环境温度，设备开机状态，测试使用
 		uint16_t ip = 0;
@@ -626,13 +623,21 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-	FIFO_Clear(uartFIFO,0);																//清空DTU串口接收FIFO
-	HAL_Delay(1000);																			
-	uint16_t cnt_time = 5 * 60 * 10;											//计算发送间隔，此处为10S 
-	printf("begin listening......\r\n");
+	uint16_t cnt_time = 5 * 60 * 10;											//计算发送间隔，此处为10 min 
   while (1)
   {
-			cnt_time++;																				
+			cnt_time++;
+		
+			if(RetryTime >= 30){																//距离上一次初始化30s
+				if(EstablishMqttConnection(productKey,deviceName,deviceSecret) == HAL_ERROR){			//如果初始化失败
+					#ifdef debug
+					printf("===================\r\n");
+					printf("Init connection failed\r\n");
+					printf("===================\r\n");
+					#endif
+					RetryTime = 0;																		//设置定时器目标值为0，等待30s后再次尝试初始化
+				}
+			}
 			
 			if(usart1_Process() == HAL_OK){										//从FiFo中取出一条完整的Json并存入ReceivedJsonBuffer中
 				memset(receive_command,0,sizeof(receive_command));
