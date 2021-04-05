@@ -31,9 +31,9 @@
 "pump01\i2c_hal.o"
 "pump01\sht3x.o"
 "pump01\flash.o"
-"pump01\yeecom.o"
-"pump01\fifo.o"
 "pump01\cjson.o"
+"pump01\fifo.o"
+"pump01\yeecom.o"
 --library_type=microlib --strict --scatter "Pump01\Pump01.sct"
 --summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols
 --info sizes --info totals --info unused --info veneers

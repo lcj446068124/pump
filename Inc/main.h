@@ -103,9 +103,11 @@ void Error_Handler(void);
 #define I2C_SDA_Pin GPIO_PIN_9
 #define I2C_SDA_GPIO_Port GPIOB
 /* USER CODE BEGIN Private defines */
-
+#define YComUart huart1
+#define YComUartInstance USART1
+#define PCUartInstance USART3
+#define PCUart huart3
 #define debug
-
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

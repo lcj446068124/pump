@@ -222,10 +222,20 @@ void init_Json_Buffer(){
 // Return:None
 // Description: 判断一条下发Json接收是否超时（3s）
 // **************************************************************
+#define send_period 600
+uint32_t send_time_counter = 0 ;
+uint8_t readyToSend = 0;
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	if (htim->Instance == htim2.Instance)
 	{
+		//printf("+1\r\n");
+		if(send_time_counter < send_period){
+			send_time_counter++;
+		}else{
+			//printf("ready to send\r\n");
+			readyToSend = 1;
+		}
 		RetryTime++;
 		//printf("%d\r\n",RetryTime);
 		if(RetryTime > 600){

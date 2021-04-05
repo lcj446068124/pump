@@ -3,9 +3,9 @@ extern FIFOTYPE *uartFIFO;
 char uploadId[10] = "0";																	//阿里云物模型相关数据string 0~4294967295				
 char propertyPostTopic[] = "thing.event.property.post";		//阿里云物模型相关数据
 char AlinkVersion[] = "1.0";															//阿里云物模型相关数据
-char PdataBuffer[100];																		//拼凑上报数据缓冲区
+char PdataBuffer[300];																		//拼凑上报数据缓冲区
 
-uint8_t aRx_uart1;																				//串口接收数据
+uint8_t aRx_uart_DTU;																				//串口接收数据
 // **************************************************************
 // Function: HAL_UART_RxCpltCallback
 // Parameters: UART pointer
@@ -14,11 +14,12 @@ uint8_t aRx_uart1;																				//串口接收数据
 // **************************************************************
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-	if(huart->Instance == USART1)//GPRS
+	if(huart->Instance == YComUartInstance)//GPRS
 	{
-		//HAL_UART_Transmit_IT(&huart3,&aRx_uart1, 1); 					//echo 
-		HAL_UART_Receive_IT(&huart1, &aRx_uart1, 1);					// enable INT receive next byte
-		uartFIFO->buffer[FIFO_BUF_LENGTH - uartFIFO->CNDTR] = aRx_uart1; //读取接收到的数据
+		 
+		HAL_UART_Receive_IT(&YComUart, &aRx_uart_DTU, 1);					// enable INT receive next byte
+		//HAL_UART_Transmit_IT(&PCUart,&aRx_uart_DTU, 1); 					//echo
+		uartFIFO->buffer[FIFO_BUF_LENGTH - uartFIFO->CNDTR] = aRx_uart_DTU; //读取接收到的数据
     uartFIFO->CNDTR--;
     if (uartFIFO->CNDTR == 0)
     {
@@ -26,7 +27,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 	}
 	
-	if(huart->Instance == USART3)//pc														
+	if(huart->Instance == PCUartInstance)//pc														
 	{
 
 	}
@@ -104,7 +105,12 @@ HAL_StatusTypeDef SendAtCommand(char* command){
 	}
 }
 
-
+// **************************************************************
+// Function: EstablishMqttConnection
+// Parameters:  const char* ProductKey,const char* DeviceName,const char* DeviceSecret
+// Return:HAL_OK，HAL_ERROR
+// Description: 建立同Ali云的MQTT连接
+// **************************************************************
 HAL_StatusTypeDef EstablishMqttConnection(const char* ProductKey,const char* DeviceName,const char* DeviceSecret){
 		
 		static uint8_t SuccessInit = 0;
@@ -199,12 +205,22 @@ HAL_StatusTypeDef checkConnection(){
 // **************************************************************
 // Function: SendMessageToAliIOT
 // Parameters:  进气压力，出水压力，进水阀角度，出水阀角度，环境温度，设备开机状态
+/*Start
+Mode_Auto
+
+进水阀电压
+出水阀电压
+出水压力
+真空负压
+进水阀角度
+出水阀角度
+*/
 // Return:HAL_OK
 // Description: 发送一条消息给阿里云
 // **************************************************************
-HAL_StatusTypeDef SendMessageToAliIOT(uint16_t ip,uint16_t op,uint16_t iAngle,uint16_t oAngle,uint16_t tmp,uint8_t statu){
+HAL_StatusTypeDef SendMessageToAliIOT(uint16_t Start,uint16_t Mode_Auto,uint32_t InWaterVal,uint32_t OutWaterVal,uint32_t PosWaterPd,uint32_t NegGasPd,uint32_t InWaterFd,uint32_t OutWaterFd){
 	
-	char* upLoadData = FormUploadData(ip,op,iAngle,oAngle,tmp,statu);
+	char* upLoadData = FormUploadData( Start, Mode_Auto, InWaterVal, OutWaterVal, PosWaterPd, NegGasPd, InWaterFd, OutWaterFd);
 	char *JsonString = FormJson(upLoadData);
 	printf("Sending: %s\r\n",JsonString);
 	SendCharToDtu(JsonString);
@@ -241,44 +257,13 @@ HAL_StatusTypeDef SendU8ToDtu(uint8_t* msg,uint16_t len){
 // Return:HAL_OK
 // Description: 组织上报数据为规定格式字符串
 // **************************************************************
-char* FormUploadData(uint16_t ip,uint16_t op,uint16_t iAngle,uint16_t oAngle,uint16_t tmp,uint8_t statu){
+char* FormUploadData(uint16_t Start,uint16_t Mode_Auto,uint32_t InWaterVal,uint32_t OutWaterVal,uint32_t PosWaterPd,uint32_t NegGasPd,uint32_t InWaterFd,uint32_t OutWaterFd){
 			memset(PdataBuffer,0,sizeof(PdataBuffer));
-			sprintf(PdataBuffer,"ip,%u,op,%u,ia,%u,oa,%u,tmp,%u,sta,%u",ip,op,iAngle,oAngle,tmp,statu);
+			sprintf(PdataBuffer,"start,%u,mode_auto,%u,inwaterval,%u,outwaterval,%u,poswaterpd,%u,neggaspd,%u,inwaterfd,%u,outwaterfd,%u",Start, Mode_Auto, InWaterVal, OutWaterVal, PosWaterPd, NegGasPd, InWaterFd, OutWaterFd);
 			return PdataBuffer;
 }
-// **************************************************************
-// Function: GetDownloadData
-// Parameters: 进气压力，出水压力，进水阀角度，出水阀角度，环境温度，设备开机状态
-// Return:None
-// Description: 解析下发命令
-// **************************************************************
-void GetDownloadData(char* data,uint16_t* ip,uint16_t* op,uint16_t* iAngle,uint16_t* oAngle,uint16_t* tmp,uint16_t* statu){
-			//sscanf(data,"ip,%hu,op,%hu,ia,%hu,oa,%hu,tmp,%hu,sta,%hu",ip,op,iAngle,oAngle,tmp,statu);
-			char* ptr = NULL;
-			ptr=strtok(data,",");
-			while(ptr != NULL){
-				if(strcmp(ptr,"ip") == 0){
-					ptr=strtok(NULL,",");
-					sscanf(ptr,"%hu",ip);
-				}else if(strcmp(ptr,"op")== 0){
-					ptr=strtok(NULL,",");
-					sscanf(ptr,"%hu",op);
-				}else if(strcmp(ptr,"ia")== 0){
-					ptr=strtok(NULL,",");
-					sscanf(ptr,"%hu",iAngle);
-				}else if(strcmp(ptr,"oa")== 0){
-					ptr=strtok(NULL,",");
-					sscanf(ptr,"%hu",oAngle);
-				}else if(strcmp(ptr,"tmp")== 0){
-					ptr=strtok(NULL,",");
-					sscanf(ptr,"%hu",tmp);
-				}else if(strcmp(ptr,"sta")== 0){
-					ptr=strtok(NULL,",");
-					sscanf(ptr,"%hu",statu);
-				}
-				ptr=strtok(NULL,",");
-			}
-}
+
+
 // **************************************************************
 // Function: FormJson
 // Parameters: 上报数据指针

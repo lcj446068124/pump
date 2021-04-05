@@ -31,6 +31,7 @@
 #include "Flash.h"
 #include "yeeCom.h"
 #include "FIFO.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -90,42 +91,52 @@ UART_HandleTypeDef huart3;
 
 #define ADC_CHANNEL_CNT  10 	 // ADC channel Num
 #define ADC_CHANNEL_FRE  16	   // Single channel data number for average
+
+#define AdjTime   600          // 自动调节时间s，10分钟
+#define WorkTime  3600*3       // 最长运行时间s，3小时
+
 uint16_t adc1_val_buf[ADC_CHANNEL_CNT * ADC_CHANNEL_FRE];  // buffer for ADC DMA trans
 uint32_t adc1_aver_val[ADC_CHANNEL_CNT];
 
-uint16_t Start=0;  // 开关机命令
+uint16_t Start=0;   // 开关机命令
 uint16_t Mstate=0;  // 主状态机
 
 uint16_t DAC1_val=0, DAC2_val=0;
 uint16_t IO1_val=0, IO2_val=0, IO3_val=0, IO4_val=0;
 
-uint16_t cnt10ms, cnt1s;
+uint16_t cnt10ms;   // 10ms计时
+uint16_t cnt1s;     // 1s计时
+uint32_t AdjTimer1s, WorkTimer1s;   // 自动调节计时，开机运行时间计时
+
+uint16_t Mode_Auto=1;   // 默认自动模式
 
 volatile int16_t NTCTemperature;  // Temperature convert from ADC value
 int32_t iTemp, iHumi;
 
-#define NegMin  1638  // -0.04KP
-#define NegMax  1936  // -0.02KP
-#define PosMin  1862  // 0.5MP
-#define PosMax  2234  // 0.6MP
-#define ConDlt  500   // 阀门控制电压与实际反馈电压的最大差值，500-->0.5v
+#define NegMin  900  // 9mA，-0.04KP
+#define NegMax  1100 // 11mA，-0.02KP
+//#define PosMin  840  // 8.4mA，0.5MP
+//#define PosMax  880  // 8.8mA，0.6MP
+#define ConDlt  300  // 阀门控制电压与实际反馈电压的最大差值，300-->0.3v
 
-#define PARAMETER_SIZE 10   // 共10个参数，读写Flash用													 
+#define PARAMETER_SIZE 12   // 共12个参数，读写Flash用													 
 struct // Parameter 系统参数结构体
 {
-	int InWaterVal;    // 进水阀控制电压0~1000，对应输出0~10V
-	int OutWaterVal;   // 出水阀控制电压0~1000，对应输出0~10V
-	int InWaterFd;     // 进水阀反馈电压0~1000，对应输出0~10V
-	int OutWaterFd;    // 出水阀反馈电压0~1000，对应输出0~10V
+	uint32_t InWaterVal;    // 进水阀控制电压0~1000，对应输出0~10V
+	uint32_t OutWaterVal;   // 出水阀控制电压0~1000，对应输出0~10V
+	uint32_t InWaterFd;     // 进水阀反馈电压0~1000，对应输出0~10V
+	uint32_t OutWaterFd;    // 出水阀反馈电压0~1000，对应输出0~10V
 	
-	int NegGasPd;      // 负压，正常范围气压-0.02~ -0.04（1936~1638）, -0.06（1340）, -0.08（1042）
-                     //	+/-0.1KP 4-20mA传感器对应数据，0气压为12mA@150欧=1.8V（2234）；
-	int PosWaterPd;    // 出水压力，正常范围气压0.5~ 0.6（1862 ~ 2234）
-	                   // 1MP 4-20mA传感器对应数据，0压力为4mA@150欧=0.6V（745）；
-	int IO1Val;
-	int IO2Val;
-	int IO3Val;
-	int IO4Val;
+	uint32_t NegGasPd;      // 负压，正常范围气压-0.02~ -0.04（1936~1638）, -0.06（1340）, -0.08（1042）
+                          //	+/-0.1KP 4-20mA传感器对应数据，0气压为12mA@150欧=1.8V（2234）；
+	uint32_t PosWaterPd;    // 出水压力，正常范围气压0.5~ 0.6（1862 ~ 2234）
+	                        // 1MP 4-20mA传感器对应数据，0压力为4mA@150欧=0.6V（745）；
+	uint32_t IO1Val;        // 输出电流1
+	uint32_t IO2Val;        // 输出电流2
+	uint32_t IO3Val;        // 输出电流3
+	uint32_t IO4Val;        // 输出电流4
+	uint32_t PosMin;        // 出水压力最小值
+  uint32_t PosMax;	      // 出水压力最大值
 //	int param[4];
 } Sys;         // 系统参数Sys
 
@@ -158,7 +169,7 @@ static void MX_TIM2_Init(void);
 int fputc(int ch,FILE *f)
 {
     uint8_t temp[1]={ch};
-    HAL_UART_Transmit(&huart3, temp, 1, 5);   // USART3，阻塞方式发送一个字符
+    HAL_UART_Transmit(&PCUart, temp, 1, 5);   // USART1，阻塞方式发送一个字符
 	return 0;
 }
 
@@ -177,17 +188,18 @@ void TIM6_ISR(void)
 	 cnt10ms++;
 }
 
-void TIM7_ISR(void)
+void TIM7_ISR(void)    // Timer7, 1s 中断
 {
 	 cnt1s++;
+	 AdjTimer1s++;
+	 WorkTimer1s++;
 }
 
-//	STM32F103 USART reg mapaing:
-/*
+//	STM32F103 USART reg mapaing:	
 #define USART1_ISR  (*((volatile unsigned int *) (0x40013800 + 0x00) ))
 #define USART1_RDR  (*((volatile unsigned int *) (0x40013800 + 0x04) ))	
 #define USART1_TDR  (*((volatile unsigned int *) (0x40013800 + 0x04) ))	
-
+/*
 #define USART2_ISR  (*((volatile unsigned int *) (0x40004400 + 0x00) ))	
 #define USART2_RDR  (*((volatile unsigned int *) (0x40004400 + 0x04) ))	
 #define USART2_TDR  (*((volatile unsigned int *) (0x40004400 + 0x04) ))	
@@ -201,12 +213,13 @@ void TIM7_ISR(void)
 #define RNE_bit 0x00000020
 	
 uint8_t aRx_uart, Rx_uart, Rx_state, RxFirst, RxSecond, RxThird;
-uint8_t TxBuffer[5];
+uint8_t TxBuffer[10];
 uint8_t  uart3cnt=0, uart3_Rxcnt=0;
+extern uint8_t aRx_uart_DTU;	
 
 void UART_ISR(void)
 {
-  // PC Communication COM3, 38400bps
+  // PC Communication COM, 38400bps
  uint16_t set_val=0;
 	
  uart3cnt++;  // for Debug only, how many times enter the UART ISR
@@ -220,74 +233,103 @@ void UART_ISR(void)
 			    RxFirst = Rx_uart;
 			    switch(RxFirst) {
 				      case 'G' :	TxBuffer[0] = 'O';
-						              HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 1); 
+						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
 						              aRx_uart = '?';  // clear command byte
                           break;						
+				      case 'E' :	Mode_Auto=1;     // 自动模式
+						              TxBuffer[0] = 'E';
+						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
+						              aRx_uart = '?';  // clear command byte
+                          break;						
+				      case 'F' :	Mode_Auto=0;     // 手动模式 
+						              TxBuffer[0] = 'F';
+						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
+						              aRx_uart = '?';  // clear command byte
+                          break;					
+				      case 'Z' :	                 // 读取状态机 
+						              TxBuffer[0] = Mstate;
+						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
+						              aRx_uart = '?';  // clear command byte
+                          break;						
+						
 				      case 'B' :	Start=1;   // 开机
 						              TxBuffer[0] = 'B';
-						              HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 1); 
+						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
 						              aRx_uart = '?';  // clear command byte
                           break;						
 				      case 'P' :	Start=0;   // 关机
 						              TxBuffer[0] = 'P';
-						              HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 1); 
+						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
+						              aRx_uart = '?';  // clear command byte
+                          break;						
+				      case 'R' :	       // 读取工作参数
+							            TxBuffer[0] = Sys.InWaterVal >>8; TxBuffer[1] = Sys.InWaterVal;    // 进水阀值
+            							TxBuffer[2] = Sys.OutWaterVal>>8; TxBuffer[3] = Sys.OutWaterVal;   // 出水阀值
+							            TxBuffer[4] = Sys.PosMin >>8; TxBuffer[5] = Sys.PosMin;            // 自动调节最小压力
+            							TxBuffer[6] = Sys.PosMax >>8; TxBuffer[7] = Sys.PosMax;            // 自动调节最大压力
+							
+							            HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 8);
 						              aRx_uart = '?';  // clear command byte
                           break;						
 						
 	            case 'T' :       // Read Temperature
                           TxBuffer[0] = NTCTemperature>>8; TxBuffer[1] = NTCTemperature;
-							            HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 2); 
+							            HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 2); 
                           aRx_uart = '?';  // clear command byte							
                           break;
 	            case 'H' :       // Read Humidity
                           TxBuffer[0] = iHumi>>8; TxBuffer[1] = iHumi;
-							            HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 2); 
+							            HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 2); 
                           aRx_uart = '?';  // clear command byte							
                           break;
 							
 	            case '1' :       // Read VI1
 							            TxBuffer[0] = adc1_aver_val[1]>>8; TxBuffer[1] = adc1_aver_val[1];
-							            HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 2);
+							            HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 2);
                           aRx_uart = '?';  // clear command byte							
                           break;
 	            case '2' :       // Read VI2
-							            TxBuffer[0] = adc1_aver_val[2]>>8; TxBuffer[1] = adc1_aver_val[2];
-							            HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 2);
+//							            TxBuffer[0] = adc1_aver_val[2]>>8; TxBuffer[1] = adc1_aver_val[2];
+							            TxBuffer[0] = Sys.NegGasPd >>8; TxBuffer[1] = Sys.NegGasPd;
+							            HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 2);
                           aRx_uart = '?';  // clear command byte							
                           break;
 	            case '3' :       // Read VI3
-							            TxBuffer[0] = adc1_aver_val[3]>>8; TxBuffer[1] = adc1_aver_val[3];
-							            HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 2);
+//							            TxBuffer[0] = adc1_aver_val[3]>>8; TxBuffer[1] = adc1_aver_val[3];
+							            TxBuffer[0] = Sys.PosWaterPd >>8; TxBuffer[1] = Sys.PosWaterPd;
+							            HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 2);
                           aRx_uart = '?';  // clear command byte							
                           break;
 	            case '4' :       // Read VI4
-							            TxBuffer[0] = adc1_aver_val[4]>>8; TxBuffer[1] = adc1_aver_val[4];
-							            HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 2);
+//							            TxBuffer[0] = adc1_aver_val[4]>>8; TxBuffer[1] = adc1_aver_val[4];
+                          TxBuffer[0] = Sys.InWaterFd >>8; TxBuffer[1] = Sys.InWaterFd;							
+							            HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 2);
                           aRx_uart = '?';  // clear command byte							
                           break;
 	            case '5' :       // Read VI5
-							            TxBuffer[0] = adc1_aver_val[5]>>8; TxBuffer[1] = adc1_aver_val[5];
-							            HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 2);
+//							            TxBuffer[0] = adc1_aver_val[5]>>8; TxBuffer[1] = adc1_aver_val[5];
+							            TxBuffer[0] = Sys.OutWaterFd >>8; TxBuffer[1] = Sys.OutWaterFd;
+							            HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 2);
                           aRx_uart = '?';  // clear command byte							
                           break;
 	            case '6' :       // Read VI6
 							            TxBuffer[0] = adc1_aver_val[6]>>8; TxBuffer[1] = adc1_aver_val[6];
-							            HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 2);
+							            HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 2);
                           aRx_uart = '?';  // clear command byte							
                           break;
 	            case '7' :       // Read VI7
 							            TxBuffer[0] = adc1_aver_val[7]>>8; TxBuffer[1] = adc1_aver_val[7];
-							            HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 2);
+							            HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 2);
                           aRx_uart = '?';  // clear command byte							
                           break;
 	            case '8' :       // Read VIN8
 							            TxBuffer[0] = adc1_aver_val[8]>>8; TxBuffer[1] = adc1_aver_val[8];
-							            HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 2);
+							            HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 2);
                           aRx_uart = '?';  // clear command byte							
                           break;
 	            case '9' :       // Read VIN9
 							            TxBuffer[0] = adc1_aver_val[9]>>8; TxBuffer[1] = adc1_aver_val[9];
-							            HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 2);
+							            HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 2);
                           aRx_uart = '?';  // clear command byte							
                           break;
 							
@@ -301,7 +343,7 @@ void UART_ISR(void)
 							            if(HAL_GPIO_ReadPin(IN6_GPIO_Port, IN6_Pin)==0)  TxBuffer[0] = TxBuffer[0] & 0xDF;   // IN6
 							            if(HAL_GPIO_ReadPin(IN7_GPIO_Port, IN7_Pin)==0)  TxBuffer[0] = TxBuffer[0] & 0xBF;   // IN7
 							
-							            HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 1);
+							            HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1);
                           aRx_uart = '?';  // clear command byte							
                           break;
 							case 'S' :           // Set Output
@@ -324,7 +366,13 @@ void UART_ISR(void)
 							            break;
 	            case 'L' :       // Set IO4 
                           Rx_state=1;
-							
+							            break;
+	            case 'M' :       // Set Sys.PosMin 
+                          Rx_state=1;
+							            break;
+	            case 'N' :       // Set Sys.PosMax 
+                          Rx_state=1;
+							            break;
 							default  :  Rx_state=0;
 							            aRx_uart = '?';  // clear command byte			
 		       								break;
@@ -358,7 +406,7 @@ void UART_ISR(void)
 											 TxBuffer[0] = 'O';
 											 Rx_state=0;
 						           aRx_uart = '?';  // clear command byte
-						           HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 1); 
+						           HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
                        break;
 						 
            case 'U' :       
@@ -367,6 +415,8 @@ void UART_ISR(void)
            case 'J' :       
            case 'K' :       
            case 'L' :       
+           case 'M' :       
+           case 'N' :       
 						 
                           Rx_state=2;
                           break;
@@ -392,7 +442,7 @@ void UART_ISR(void)
 														 }
 													Rx_state=0;
 						              aRx_uart = '?';  // clear command byte
-						              HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 1); 
+						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
                           break;
            case 'V' :       // Set DAC2 0~1000 --> 0~10.00v
 						              set_val = RxSecond *256 + RxThird;
@@ -406,7 +456,31 @@ void UART_ISR(void)
 														 }
 													Rx_state=0;
 						              aRx_uart = '?';  // clear command byte
-						              HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 1); 
+						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
+                          break;
+           case 'M' :       // Set Sys.PosMin, 0~1000, 0.00~10.00mA
+						              set_val = RxSecond *256 + RxThird;
+					                if ( (set_val<800)||(set_val>1300) )  { TxBuffer[0] = 'E'; }
+					                   else {
+                      		      Sys.PosMin = set_val;
+	                              WriteFlashNWord(0, (int*)&Sys, PARAMETER_SIZE);		// 一次写入全部参数	
+													      TxBuffer[0] = 'O';
+														 }
+													Rx_state=0;
+						              aRx_uart = '?';  // clear command byte
+						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
+                          break;
+           case 'N' :       // Set Sys.PosMax, 0~1000, 0.00~10.00mA
+						              set_val = RxSecond *256 + RxThird;
+					                if ( (set_val<800)||(set_val>1300) )  { TxBuffer[0] = 'E'; }
+					                   else {
+                      		      Sys.PosMax = set_val;
+	                              WriteFlashNWord(0, (int*)&Sys, PARAMETER_SIZE);		// 一次写入全部参数	
+													      TxBuffer[0] = 'O';
+														 }
+													Rx_state=0;
+						              aRx_uart = '?';  // clear command byte
+						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
                           break;
 
            case 'I' :       // Set IO1
@@ -418,7 +492,7 @@ void UART_ISR(void)
 														 }
 													Rx_state=0;
 						              aRx_uart = '?';  // clear command byte
-						              HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 1); 
+						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
                           break;
            case 'J' :       // Set IO2
 						              IO2_val = RxSecond *256 + RxThird;
@@ -429,7 +503,7 @@ void UART_ISR(void)
 														 }
 													Rx_state=0;
 						              aRx_uart = '?';  // clear command byte
-						              HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 1); 
+						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
                           break;
            case 'K' :       // Set IO3
 						              IO3_val = RxSecond *256 + RxThird;
@@ -440,7 +514,7 @@ void UART_ISR(void)
 														 }
 													Rx_state=0;
 						              aRx_uart = '?';  // clear command byte
-						              HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 1); 
+						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
                           break;
            case 'L' :       // Set IO4
 						              IO4_val = RxSecond *256 + RxThird;
@@ -451,13 +525,13 @@ void UART_ISR(void)
 														 }
 													Rx_state=0;
 						              aRx_uart = '?';  // clear command byte
-						              HAL_UART_Transmit_IT(&huart3,(uint8_t*)TxBuffer, 1); 
+						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
                           break;
 						
  		        }
 		}
 	 
-  HAL_UART_Receive_IT(&huart3, &aRx_uart, 1);   // enable INT receive next byte
+  HAL_UART_Receive_IT(&PCUart, &aRx_uart, 1);   // enable INT receive next byte
 	}  // Rx INT
 
 }
@@ -465,12 +539,89 @@ void UART_ISR(void)
 
 
 
+
 extern char ReceivedJsonBuffer[];																		//下发Json缓存
-char receive_command[100];																					//抽取下发Json中的控制指令缓存
+char receive_command[300];																					//抽取下发Json中的控制指令缓存
 const char* productKey = "g34tzHdyy7Z";															//阿里云三元组productKey
-const char* deviceName = "P0000001";																//阿里云三元组deviceName
-const char* deviceSecret = "1513a690b37f87f7e18e5e9e149107dd";			//阿里云三元组deviceSecret
-extern uint16_t RetryTime;																					//尝试初始化DTU时间间隔counter
+const char* deviceName = "P0000003";																//阿里云三元组deviceName
+const char* deviceSecret = "dbf892ce52c7cb2d44581b58cb119cec";			//阿里云三元组deviceSecret
+extern uint16_t RetryTime;
+extern uint32_t send_time_counter;
+extern uint8_t readyToSend;
+void UpdateStateByCommand(char* command,uint16_t* start,uint16_t* mode_Auto,uint32_t* InWaterVal,uint32_t* OutWaterVal){
+			char* ptr = NULL;
+			ptr=strtok(command,",");
+			while(ptr != NULL){
+				if(strcmp(ptr,"start") == 0){
+					ptr=strtok(NULL,",");
+					uint16_t substart = 0;
+					sscanf(ptr,"%hu",&substart);
+					if(substart != 0 && substart != 1){
+						continue;
+					}
+					if(substart == 0){
+							*start = 0;
+					}else{
+							*start = 1;
+					}
+				}else if(strcmp(ptr,"mode_auto")== 0){
+					ptr=strtok(NULL,",");
+					uint16_t submode = 0;
+					sscanf(ptr,"%hu",&submode);
+					if(submode != 0 && submode != 1){
+						continue;
+					}
+					if(submode == 0){
+							*mode_Auto = 0;
+					}else{
+							*mode_Auto = 1;
+					}
+				}else if(strcmp(ptr,"inwaterval")== 0){
+					ptr=strtok(NULL,",");
+					uint32_t subInWaterVal = 0;
+					sscanf(ptr,"%u",&subInWaterVal);
+					if(subInWaterVal <= 1000 && *start == 0){
+						*InWaterVal = subInWaterVal;
+						WriteFlashNWord(0, (int*)&Sys, PARAMETER_SIZE);		// 一次写入全部参数	
+						DAC1_val = (uint16_t)((float)Sys.InWaterVal * 4.095);
+						HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC1_val );
+					}
+				}else if(strcmp(ptr,"outwaterval")== 0){
+					ptr=strtok(NULL,",");
+					uint32_t subOutWaterVal = 0;
+					sscanf(ptr,"%u",&subOutWaterVal);
+					if(subOutWaterVal <= 1000 && *start == 0){
+						*OutWaterVal = subOutWaterVal;
+						WriteFlashNWord(0, (int*)&Sys, PARAMETER_SIZE);		// 一次写入全部参数	
+						DAC1_val = (uint16_t)((float)Sys.OutWaterVal * 4.095);
+						HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, DAC1_val );
+					}
+				}
+				ptr=strtok(NULL,",");
+			}
+			readyToSend = 1;
+}
+void TryToReceiveMessage(){
+	if(usart1_Process() == HAL_OK){										//从FiFo中取出一条完整的Json并存入ReceivedJsonBuffer中
+					memset(receive_command,0,sizeof(receive_command));
+					printf("%s \r\n",ReceivedJsonBuffer);
+					//解析Json数据
+					cJSON * receiveJson = cJSON_Parse(ReceivedJsonBuffer);
+					cJSON * myParams = cJSON_GetObjectItem(receiveJson,"params");
+					cJSON *Pdata = cJSON_GetObjectItem(myParams,"DATA");
+					if(Pdata!= NULL){
+						//获取命令字符串
+						strcpy(receive_command,Pdata->valuestring);
+						printf("%s \r\n",receive_command);
+						//解析命令字符串且更新状态
+						UpdateStateByCommand(receive_command,&Start,&Mode_Auto,&(Sys.InWaterVal),&(Sys.OutWaterVal));
+						printf("update OK !!!\r\n");
+					}
+					cJSON_Delete(receiveJson);
+			}
+
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -480,8 +631,9 @@ extern uint16_t RetryTime;																					//尝试初始化DTU时间间隔counter
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-	uint16_t TempErrorCnt=0;
-	uint16_t i;
+//	uint16_t TempErrorCnt=0;
+	uint16_t i, dt_cnt=0;
+	uint32_t dt_avg[4];
 	
   /* USER CODE END 1 */
 
@@ -516,12 +668,12 @@ int main(void)
   MX_RTC_Init();
   MX_TIM6_Init();
   MX_TIM7_Init();
-  MX_TIM2_Init();																										
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 
 	HAL_TIM_Base_Start_IT(&htim6);   // TIM6  INT enable
 	HAL_TIM_Base_Start_IT(&htim7);   // TIM7  INT enable
-	HAL_TIM_Base_Start_IT(&htim2);   // TIM2  INT enable	8M input frequency 1s interupt
+	HAL_TIM_Base_Start_IT(&htim2);   // TIM2  INT enable	72M input frequency 1s interupt
 	
 	HAL_TIM_PWM_Start(&htim8,TIM_CHANNEL_1);      // TIM8_CH1 PWM enable
 	HAL_TIM_PWM_Start(&htim8,TIM_CHANNEL_2);      // TIM8_CH2 PWM enable
@@ -539,10 +691,8 @@ int main(void)
   HAL_GPIO_WritePin(OUT6_GPIO_Port, OUT6_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(BUZZ_GPIO_Port, BUZZ_Pin, GPIO_PIN_RESET);
 	
-	 
-	
   	HAL_UART_Receive_IT(&huart3, &aRx_uart, 1);  // UART3 for PC communication
-		HAL_UART_Receive_IT(&huart1, &aRx_uart, 1);  // UART1 for GPRS communication
+		HAL_UART_Receive_IT(&huart1, &aRx_uart_DTU, 1);  // UART1 for GPRS communication
 	
 		HAL_ADC_Start(&hadc1); 						
     HAL_ADCEx_Calibration_Start(&hadc1);    // ADC 自校正
@@ -556,20 +706,20 @@ int main(void)
 		HAL_DAC_Start(&hdac, DAC_CHANNEL_2);
 
     ReadFlashNWord(0, (int*)&Sys, PARAMETER_SIZE);   // 读取系统参数
-		if ((Sys.InWaterVal<100)||(Sys.InWaterVal>900)||(Sys.OutWaterVal<100)||(Sys.OutWaterVal>900))  // 1.0V~9.0V
+		
+		if ( (Sys.InWaterVal<100)||(Sys.InWaterVal>1000)||(Sys.OutWaterVal<100)||(Sys.OutWaterVal>1000) || \
+			   (Sys.PosMin < 800)||(Sys.PosMax < 800) || (Sys.PosMin > 1300) ||(Sys.PosMax > 1300) || (Sys.PosMin >= Sys.PosMax) ) 
+		                             // 检查参数是否在合理范围
 		  {	
-				Sys.InWaterVal = 520;   //  5.2v
-				Sys.OutWaterVal = 380;  //  3.8v
+				Sys.InWaterVal  = 800;   // 进水阀8.00v
+				Sys.OutWaterVal = 660;   // 出水阀6.60v
 				Sys.IO1Val = 0;          // 0mA
-				Sys.IO1Val = 400;        // 4mA
-				Sys.IO1Val = 1000;       // 10mA
-				Sys.IO1Val = 2000;       // 20mA
-/*
-				Sys.param[0] = 100;
-				Sys.param[1] = 200;
-				Sys.param[2] = 300;
-				Sys.param[3] = 400;
-*/				
+				Sys.IO2Val = 400;        // 4mA
+				Sys.IO3Val = 1000;       // 10mA
+				Sys.IO4Val = 2000;       // 20mA
+        Sys.PosMin = 840;        // 最小压力8.4mA
+				Sys.PosMax = 880;        // 最大压力8.8mA
+				
 	      // write FLASH, Erase one Page!
 	      WriteFlashNWord(0, (int*)&Sys, PARAMETER_SIZE);		// 一次写入全部参数	
 			}
@@ -577,57 +727,43 @@ int main(void)
 		// read parameters from Flash Memory
     ReadFlashNWord(0, (int*)&Sys, PARAMETER_SIZE);    // 一次读出全部参数
 
+		GATE24V_OFF;     // 关阀门电源
+    MAIN_MOTOR_OFF;  // 关380v主电机
+    GAS_OFF;         // 释放进气阀（常开）
+
+//    HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0);
+//    HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, 0);
 		
-//		DAC1_val = Sys.InWaterVal *4;   // x4.096
-//		DAC2_val = Sys.OutWaterVal*4;
-//		HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC1_val);
-//		HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, DAC2_val);
+		DAC1_val = Sys.InWaterVal *4.095;   // x4.096，进水阀、出水阀控制电压恢复原值
+		DAC2_val = Sys.OutWaterVal*4.095;
+		HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC1_val);
+		HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, DAC2_val);
 			
   __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, Sys.IO1Val);  // 设置占空比0%,  0mA
   __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_2, Sys.IO2Val);  // 设置占空比20%, 4mA
   __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_3, Sys.IO3Val);  // 设置占空比50%, 10mA
   __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_4, Sys.IO4Val);  // 设置占空比100%, 20mA
 
-		GATE24V_OFF;     // 关阀门电源
-    MAIN_MOTOR_OFF;  // 关380v主电机
-    GAS_OFF;         // 释放进气阀（常开）
-//    HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0);
-//    HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, 0);
 		
 	  HAL_Delay(20);
 	  Mstate=0;
 			
-//    printf("\n\rBEGIN Pump......\n\r"); 
-//			printf("InW : %d\r\n", Sys.InWaterVal);
-//			printf("OutW: %d\r\n", Sys.OutWaterVal);
+    printf("\n\rBEGIN Pump......\n\r"); 
+			printf("InW : %d\r\n", Sys.InWaterVal);
+			printf("OutW: %d\r\n", Sys.OutWaterVal);
 
-
-		//读取并输出当前MCU工作频率
-		RCC_ClkInitTypeDef RCC_ClkInitStruct;
-		uint32_t pFLatency;
-		HAL_RCC_GetClockConfig(&RCC_ClkInitStruct,&pFLatency);
-		printf("ClockType: %d\nSYSCLKSource %d\nAHBCLKDivider %d\nAPB1CLKDivider %d\nAPB2CLKDivider %d\n",RCC_ClkInitStruct.ClockType,RCC_ClkInitStruct.SYSCLKSource,RCC_ClkInitStruct.AHBCLKDivider,RCC_ClkInitStruct.APB1CLKDivider,RCC_ClkInitStruct.APB2CLKDivider);
-		uint32_t sysclock = 0;   
-		sysclock = HAL_RCC_GetSysClockFreq();
-		printf("\r\nsysclock: %d\r\n",sysclock);
-		
-		
-		//临时变量，存储进气压力，出水压力，进水阀角度，出水阀角度，环境温度，设备开机状态，测试使用
-		uint16_t ip = 0;
-		uint16_t op = 0;
-		uint16_t ia = 0;
-		uint16_t oa = 0;
-		uint16_t tmp = 0;
-		uint16_t sta = 0;
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-	uint16_t cnt_time = 5 * 60 * 10;											//计算发送间隔，此处为10 min 
+	
+	dt_cnt=0;
+	for (i=0; i<4; i++) dt_avg[i]=0;
+	
+	Mode_Auto =0;   // 非自动模式
+	readyToSend = 1;//发送第一条报文
   while (1)
   {
-			cnt_time++;
-		
 			if(RetryTime >= 30){																//距离上一次初始化30s
 				if(EstablishMqttConnection(productKey,deviceName,deviceSecret) == HAL_ERROR){			//如果初始化失败
 					#ifdef debug
@@ -639,78 +775,97 @@ int main(void)
 				}
 			}
 			
-			if(usart1_Process() == HAL_OK){										//从FiFo中取出一条完整的Json并存入ReceivedJsonBuffer中
-				memset(receive_command,0,sizeof(receive_command));
-				printf("%s \r\n",ReceivedJsonBuffer);
-				//解析Json数据
-				cJSON * receiveJson = cJSON_Parse(ReceivedJsonBuffer);
-				cJSON * myParams = cJSON_GetObjectItem(receiveJson,"params");
-				cJSON *Pdata = cJSON_GetObjectItem(myParams,"DATA");
-				if(Pdata!= NULL){
-					//获取命令字符串
-					strcpy(receive_command,Pdata->valuestring);
-					printf("%s \r\n",receive_command);
-					//解析命令字符串
-					GetDownloadData(receive_command,&ip,&op,&ia,&oa,&tmp,&sta);
-					//打印更新后的存储进气压力，出水压力，进水阀角度，出水阀角度，环境温度，设备开机状态
-					printf("%u %u %u %u %u %u\r\n",ip,op,ia,oa,tmp,sta);
-					//此次循环结束立刻上报更新信息
-					cnt_time = 5 * 60 * 10;
-				}
-				cJSON_Delete(receiveJson);
-			}
-	
-			if(cnt_time >= 5 * 60 * 10 ){								//到达10s，开始上报进气压力，出水压力，进水阀角度，出水阀角度，环境温度，设备开机状态
-				SendMessageToAliIOT(ip,op,ia,oa,tmp,sta);	//上报进气压力，出水压力，进水阀角度，出水阀角度，环境温度，设备开机状态
-				cnt_time = 0;															//清除计时
-			}
+			TryToReceiveMessage();
 			
 		  switch (Mstate)
 			{
-				case 0 :  if (Start==1)    // 串口 或 外部启动
-					            Mstate=1;
+				case 0 :  if (Start==1) {   // 串口 或 外部启动
+					             Mstate=1;
+				             }
+				          WorkTimer1s=0;
 					        break;
 				
 				case 1 :  
-	
-					        GATE24V_ON;
-          				DAC1_val = (float)Sys.InWaterVal *4.095;   // x4.095
-		              DAC2_val = (float)Sys.OutWaterVal*4.095;
+					        GATE24V_ON;    // 阀门辅助电源
+          				DAC1_val = Sys.InWaterVal *4.095;   // x4.095
+		              DAC2_val = Sys.OutWaterVal*4.095;
 		              HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC1_val);
 		              HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, DAC2_val);
-                  MAIN_MOTOR_ON;
+                  MAIN_MOTOR_ON;   // 380V主电机
 				          cnt1s=0;
 				          Mstate=2;
 					        break;
         
-				case 2 :  if (cnt1s>10)  Mstate=3;    // Delay 10s
+				case 2 :  if (cnt1s < 30)  break;         // 延时 30s，手动模式
+				          if (Mode_Auto==1)  Mstate=3;    // 自动模式
+				          AdjTimer1s=0;       // 自动调节计时清零
+				          cnt1s=50;           // 避免2次延时30s
 				          break;
 				
-				case 3 :  
+				case 3 :   // 检查阀门是否到位，反馈电压与控制电压相差不超过0.2v
 				          if ( (Sys.InWaterFd > (Sys.InWaterVal-ConDlt)) &&(Sys.InWaterFd < (Sys.InWaterVal+ConDlt)) \
-										&& (Sys.OutWaterFd >(Sys.OutWaterVal-ConDlt))&&(Sys.OutWaterFd <(Sys.OutWaterVal+ConDlt)) )      // 阀门控制是否到位？
-                    {
-											if ((Sys.NegGasPd>NegMin)&&(Sys.NegGasPd<NegMax)&&(Sys.PosWaterPd>PosMin)&&(Sys.PosWaterPd<PosMax) )	// 压力是否正常？
+										&& (Sys.OutWaterFd >(Sys.OutWaterVal-ConDlt))&&(Sys.OutWaterFd <(Sys.OutWaterVal+ConDlt)) )      
+									    {  cnt1s=0;
+												 Mstate=4;      // 阀门控制到位，判断压力
+											}
+                     else  {            // 阀门不到位
+											   cnt1s=0;
+											   Mstate=7;      // 延时3秒再判
+											   if (AdjTimer1s > AdjTime) {   // 自动调节10分钟 
+													   Mstate =10;         // 自动关机
+												   }
+										   }											 
+									break;
+									
+				case 4 : 	if (cnt1s<10)  break;  // 阀门到位后，压力判断延时10s，避免调节过频繁  
+					        if ((Sys.NegGasPd > NegMin)&&(Sys.NegGasPd < NegMax)&&(Sys.PosWaterPd > Sys.PosMin)&&(Sys.PosWaterPd < Sys.PosMax) )	// 压力是否正常？
 											  { 
-													Mstate=4;      // 阀门控制到位、气压正常 
+													Mstate=5;      // 阀门控制到位、压力正常 
 												}
-												else
+											else
 												{
-													Mstate=5;      // 气压不正常
+													Mstate=6;      // 压力不正常，进行自动调节
+													if ( (Sys.NegGasPd>1200) ||(Sys.NegGasPd<800) || (Sys.PosWaterPd>1500)||(Sys.PosWaterPd<400))
+													  { Mstate =10;     // 压力超限，自动关机。负压正常在1000~1100，水压正常在800~1300
+													  }
+											    if (AdjTimer1s > AdjTime) { // 自动调节10分钟 
+													    Mstate =10;             // 自动关机
+													  }
 												}	
-									  } 
-										else  Mstate=6;      // 阀门控制不到位
-									break;	
-										     
-				        
-				case 4 :  Mstate=3;
 									break;
 										
-				case 5 :	Mstate=3;
+				case 5 :	AdjTimer1s=0;    // 正常状态，自动调节总计时清零
+					        Mstate=3;
 									break;
-        case 6 :  Mstate=3;
+										
+        case 6 :  if (Sys.PosWaterPd < Sys.PosMin)     // 压力偏小
+				            {
+											if (Sys.OutWaterVal >350)     // 最低3.5V 
+												  Sys.OutWaterVal -= 20;    // -0.2v 
+		                  DAC2_val = Sys.OutWaterVal*4.095;
+		                  HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, DAC2_val);
+										}
+										
+                  if (Sys.PosWaterPd > Sys.PosMax)     // 压力偏大
+				            {
+											if (Sys.OutWaterVal < Sys.InWaterVal)   // 最高进水阀值
+												  Sys.OutWaterVal += 20;              // +0.2v 
+		                  DAC2_val = Sys.OutWaterVal*4.095;
+		                  HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, DAC2_val);
+										}
+								  
+					        cnt1s=0;
+					        Mstate=7;
 									break;
-				
+										
+        case 7 :  if (cnt1s<3) break;   // 调节阀门到位延时3s
+                  Mstate=3;
+                  break;
+										
+        case 8 :  if (cnt1s<10) break;  // 阀门到位后压力判断延时10s
+                  Mstate=4;
+                  break;
+										
         case 10:  GAS_ON;					// 关机序列，关进气阀					
 				          cnt1s=0;
 				          Mstate=11;
@@ -724,18 +879,35 @@ int main(void)
 				          GAS_OFF;         // 释放进气阀（常开）
 									Mstate=0;
 									Start=0;
+	             // write FLASH, Erase one Page!
+           	      WriteFlashNWord(0, (int*)&Sys, PARAMETER_SIZE);		// 一次写入全部参数	
 									break;
 				          
 			}  // switch
 		
-			if  (START==0) Start=1;     // 外部启动
-			if  (STOP==0)  Start=0;     // 外部停止
-			if ( (Start==0) && (Mstate>0) && (Mstate<10)) Mstate=10;   // 关机
+			if  (START==0) {    // 外部启动
+				 HAL_Delay(20);
+				 if (START==0) {
+					 HAL_Delay(20);
+					 if (START==0) Start=1;     
+				 }
+			  }
 			
-			
-  		HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);		// LED Flash
- 
-      for(i=0; i<ADC_CHANNEL_CNT; i++)    // clear ADC value
+			if  (STOP==0)  {    // 外部停止
+				 HAL_Delay(20);
+				 if (STOP==0) {
+					 HAL_Delay(20);
+					 if (STOP==0) Start=0;   
+				 }
+			  }
+				
+			if ( (Start==0) && (Mstate>0) && (Mstate<10)) Mstate=10;      // 关机
+				
+			if ( WorkTimer1s > WorkTime) Mstate=10;       // 3小时自动关机
+				
+      if ( (Mode_Auto==0) && (Mstate>1) && (Mstate<10)) Mstate=2;   // 手动模式
+				
+      for(i=0; i<ADC_CHANNEL_CNT; i++)    // clear ADC data
        {
          adc1_aver_val[i] = 0;
        }
@@ -745,33 +917,54 @@ int main(void)
        {
          adc1_aver_val[0] +=  adc1_val_buf[i*ADC_CHANNEL_CNT+0];    // ADC1_IN10, NTC
          adc1_aver_val[1] +=  adc1_val_buf[i*ADC_CHANNEL_CNT+1];    // ADC1_IN11, VIN1(4~20mA)
-         adc1_aver_val[2] +=  adc1_val_buf[i*ADC_CHANNEL_CNT+2];    // ADC1_IN12, VIN2(4~20mA)
-         adc1_aver_val[3] +=  adc1_val_buf[i*ADC_CHANNEL_CNT+3];    // ADC1_IN13, VIN3(4~20mA)
-         adc1_aver_val[4] +=  adc1_val_buf[i*ADC_CHANNEL_CNT+4];    // ADC1_IN0, VIN4(0~10V), 
-         adc1_aver_val[5] +=  adc1_val_buf[i*ADC_CHANNEL_CNT+5];    // ADC1_IN1, VIN5(0~10V)
+         adc1_aver_val[2] +=  adc1_val_buf[i*ADC_CHANNEL_CNT+2];    // ADC1_IN12, VIN2(4~20mA)，真空
+         adc1_aver_val[3] +=  adc1_val_buf[i*ADC_CHANNEL_CNT+3];    // ADC1_IN13, VIN3(4~20mA)，压力
+         adc1_aver_val[4] +=  adc1_val_buf[i*ADC_CHANNEL_CNT+4];    // ADC1_IN0, VIN4(0~10V), 进水阀反馈
+         adc1_aver_val[5] +=  adc1_val_buf[i*ADC_CHANNEL_CNT+5];    // ADC1_IN1, VIN5(0~10V)，出水阀反馈
          adc1_aver_val[6] +=  adc1_val_buf[i*ADC_CHANNEL_CNT+6];    // ADC1_IN2, VIN6(0~5V)
          adc1_aver_val[7] +=  adc1_val_buf[i*ADC_CHANNEL_CNT+7];    // ADC1_IN3, VIN7(0~5V, 浑浊度)
          adc1_aver_val[8] +=  adc1_val_buf[i*ADC_CHANNEL_CNT+8];    // ADC1_IN6, VIN8(4~20mA)
          adc1_aver_val[9] +=  adc1_val_buf[i*ADC_CHANNEL_CNT+9];    // ADC1_IN7, VIN9(4~20mA)
        }
     
-	  // 	average
+	  // 	ADC data average
       for(i=0; i<ADC_CHANNEL_CNT; i++)
        {
          adc1_aver_val[i] /= ADC_CHANNEL_FRE;
 //				 printf("ADC RANK%d: %d\r\n",i, adc1_aver_val[i]);
        }
-			
-	   Sys.InWaterFd  = (adc1_aver_val[4]*1000)/4096;    // 进水阀反馈电压0~1000，对应输出0~10V
-	   Sys.OutWaterFd = (adc1_aver_val[5]*1000)/4096;    // 出水阀反馈电压0~1000，对应输出0~10V
-	   Sys.NegGasPd   = adc1_aver_val[2];    // 负气压，正常范围气压-0.02~ -0.04（1936~1638）, -0.06（1340）, -0.08（1042）
-                                           //	+/-0.1KP 4-20mA传感器对应数据，0气压为12mA@150欧=1.8V（2234）；
-	   Sys.PosWaterPd = adc1_aver_val[3];    // 出水压力，正常范围气压0.5~ 0.6（1862 ~ 2234）
-	                                         // 1MP 4-20mA传感器对应数据，0压力为4mA@150欧=0.6V（745）；
+
+		 Sys.InWaterFd  = (adc1_aver_val[4]*1000)/4096;    // 进水阀反馈电压0~1000，对应输出0~10.00V
+     Sys.OutWaterFd = (adc1_aver_val[5]*1000)/4096;    // 出水阀反馈电压0~1000，对应输出0~10.00V
+			 
+		dt_avg[0] += adc1_aver_val[4];    // 进水阀反馈电压
+		dt_avg[1] += adc1_aver_val[5];    // 出水阀反馈电压
+		dt_avg[2] += adc1_aver_val[2];    // 真空压力
+		dt_avg[3] += adc1_aver_val[3];    // 出水压力
+		dt_cnt++;
+
+    if (dt_cnt>=20)   // while大循环100ms，2s
+		  { 
+				for(i=0; i<4; i++) dt_avg[i] = dt_avg[i]/ dt_cnt;   // 2s平均
+   
+//				Sys.InWaterFd  = (dt_avg[0]*1000)/4096;    // 进水阀反馈电压0~1000，对应输出0~10.00V
+//	      Sys.OutWaterFd = (dt_avg[1]*1000)/4096;    // 出水阀反馈电压0~1000，对应输出0~10.00V
+	      Sys.NegGasPd   = (dt_avg[2]*2200)/4096;      // 真空负压，400~2000，对应4.00mA~20.00mA, 零压为12mA，
+			                                               // 正常工作时负气压为10~11mA；-0.02~ -0.04（1936~1638）, -0.06（1340）, -0.08（1042）
+                                                     //	+/-0.1KP 4-20mA传感器对应数据，0气压为12mA@150欧=1.8V（2234）；
+	      Sys.PosWaterPd = (dt_avg[3]*2200)/4096;      // 出水压力，400~2000，对应4.00~20.00mA，零压力为4mA；
+			                                               // 正常工作时水压为8.4~8.8mA；0.5~ 0.6MPa（1862 ~ 2234）
+	                                                   // 1MP 4-20mA传感器对应数据，0压力为4mA@150欧=0.6V（745）；
+			                                               // *2200是因为150欧取样电阻，20mA时压降3V，比满量程3.3v小10%，所以把2000扩大10% 
+
+				for(i=0; i<4; i++) dt_avg[i] = 0; 
+        dt_cnt=0;				
+			} 
 			 
       NTCTemperature = StartNTC(adc1_aver_val[0]);  // cal NTC Temperature
 //		  printf("NTC Temp = %d C \r\n", NTCTemperature);
-/*	
+			
+/*	温湿度传感器
 	    if ( (SHT20_GetTemp( &iTemp )==0) && (SHT20_GetRH( &iHumi ) ==0) )
 			   { TempErrorCnt=0; 
 //			     printf("SHT20: Temp = %03d C  RH = %02d \r\n", (iTemp+5)/10, (iHumi+50)/100);
@@ -787,9 +980,16 @@ int main(void)
 //			if (TempErrorCnt>10)   	printf("SHT2x/3x Sensor error! \r\n");
 */    				
 
-//      printf("Mstate: %d \r\n", Mstate);		
-      HAL_Delay(200);
-		
+//      printf("Mstate: %d \r\n", Mstate);	
+			if(readyToSend == 1 ){								
+				SendMessageToAliIOT(Start,Mode_Auto,Sys.InWaterVal,Sys.OutWaterVal,Sys.PosWaterPd,Sys.NegGasPd,Sys.InWaterFd,Sys.OutWaterFd);
+				send_time_counter = 0;															//清除计时
+				readyToSend = 0;
+			}
+			
+      HAL_Delay(100);   // 大循环100ms
+	    HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);		// LED Flash		
+			
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -809,11 +1009,14 @@ void SystemClock_Config(void)
 
   /** Initializes the CPU, AHB and APB busses clocks
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_LSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE|RCC_OSCILLATORTYPE_LSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
   RCC_OscInitStruct.LSEState = RCC_LSE_ON;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -822,12 +1025,12 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -1122,7 +1325,7 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 800-1;
+  htim2.Init.Prescaler = 7200-1;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim2.Init.Period = 10000-1;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -1360,7 +1563,7 @@ static void MX_USART3_UART_Init(void)
 
   /* USER CODE END USART3_Init 1 */
   huart3.Instance = USART3;
-  huart3.Init.BaudRate = 19200;
+  huart3.Init.BaudRate = 9600;
   huart3.Init.WordLength = UART_WORDLENGTH_8B;
   huart3.Init.StopBits = UART_STOPBITS_1;
   huart3.Init.Parity = UART_PARITY_NONE;
