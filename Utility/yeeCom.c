@@ -89,7 +89,9 @@ HAL_StatusTypeDef initDtu(const char* ProductKey,const char* DeviceName,const ch
 HAL_StatusTypeDef SendAtCommand(char* command){
 	const uint8_t Response_len = 10;
 	char DtuResponse[Response_len];
+	#ifdef debug
 	printf("%s\r\n",command);
+	#endif
 	while(1){
 		memset(DtuResponse,0,sizeof(DtuResponse));
 		FIFO_Clear(uartFIFO,0);
@@ -218,14 +220,18 @@ Mode_Auto
 // Return:HAL_OK
 // Description: 发送一条消息给阿里云
 // **************************************************************
-HAL_StatusTypeDef SendMessageToAliIOT(uint16_t Start,uint16_t Mode_Auto,uint32_t InWaterVal,uint32_t OutWaterVal,uint32_t PosWaterPd,uint32_t NegGasPd,uint32_t InWaterFd,uint32_t OutWaterFd){
+HAL_StatusTypeDef SendMessageToAliIOT(uint16_t Start,uint16_t Mode_Auto,uint32_t InWaterVal,uint32_t OutWaterVal,uint32_t PosWaterPd,uint32_t NegGasPd,uint32_t InWaterFd,uint32_t OutWaterFd,uint32_t PosMin,uint32_t PosMax){
 	
-	char* upLoadData = FormUploadData( Start, Mode_Auto, InWaterVal, OutWaterVal, PosWaterPd, NegGasPd, InWaterFd, OutWaterFd);
+	char* upLoadData = FormUploadData( Start, Mode_Auto, InWaterVal, OutWaterVal, PosWaterPd, NegGasPd, InWaterFd, OutWaterFd, PosMin, PosMax);
 	char *JsonString = FormJson(upLoadData);
+	#ifdef debug
 	printf("Sending: %s\r\n",JsonString);
+	#endif
 	SendCharToDtu(JsonString);
 	free(JsonString);
+	#ifdef debug
 	printf("Done!\r\n");
+	#endif
 	return HAL_OK;
 }
 // **************************************************************
@@ -257,9 +263,9 @@ HAL_StatusTypeDef SendU8ToDtu(uint8_t* msg,uint16_t len){
 // Return:HAL_OK
 // Description: 组织上报数据为规定格式字符串
 // **************************************************************
-char* FormUploadData(uint16_t Start,uint16_t Mode_Auto,uint32_t InWaterVal,uint32_t OutWaterVal,uint32_t PosWaterPd,uint32_t NegGasPd,uint32_t InWaterFd,uint32_t OutWaterFd){
+char* FormUploadData(uint16_t Start,uint16_t Mode_Auto,uint32_t InWaterVal,uint32_t OutWaterVal,uint32_t PosWaterPd,uint32_t NegGasPd,uint32_t InWaterFd,uint32_t OutWaterFd,uint32_t PosMin,uint32_t PosMax){
 			memset(PdataBuffer,0,sizeof(PdataBuffer));
-			sprintf(PdataBuffer,"start,%u,mode_auto,%u,inwaterval,%u,outwaterval,%u,poswaterpd,%u,neggaspd,%u,inwaterfd,%u,outwaterfd,%u",Start, Mode_Auto, InWaterVal, OutWaterVal, PosWaterPd, NegGasPd, InWaterFd, OutWaterFd);
+			sprintf(PdataBuffer,"start,%u,mode_auto,%u,inwaterval,%u,outwaterval,%u,poswaterpd,%u,neggaspd,%u,inwaterfd,%u,outwaterfd,%u,posmin,%u,posmax,%u",Start, Mode_Auto, InWaterVal, OutWaterVal, PosWaterPd, NegGasPd, InWaterFd, OutWaterFd,PosMin, PosMax);
 			return PdataBuffer;
 }
 

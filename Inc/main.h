@@ -107,7 +107,7 @@ void Error_Handler(void);
 #define YComUartInstance USART1
 #define PCUartInstance USART3
 #define PCUart huart3
-#define debug
+//#define debug
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

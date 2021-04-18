@@ -19,7 +19,7 @@ HAL_StatusTypeDef initDtu(const char* ProductKey,const char* DeviceName,const ch
 HAL_StatusTypeDef checkConnection(void );
 
 // Description: 发送一条消息给阿里云
-HAL_StatusTypeDef SendMessageToAliIOT(uint16_t Start,uint16_t Mode_Auto,uint32_t InWaterVal,uint32_t OutWaterVal,uint32_t PosWaterPd,uint32_t NegGasPd,uint32_t InWaterFd,uint32_t OutWaterFd);
+HAL_StatusTypeDef SendMessageToAliIOT(uint16_t Start,uint16_t Mode_Auto,uint32_t InWaterVal,uint32_t OutWaterVal,uint32_t PosWaterPd,uint32_t NegGasPd,uint32_t InWaterFd,uint32_t OutWaterFd,uint32_t PosMin,uint32_t PosMax);
 
 // Description: 发送DTU配置类AT指令（配置类AT指令返回OK，ERROR）
 HAL_StatusTypeDef SendAtCommand(char* command);
@@ -29,7 +29,7 @@ HAL_StatusTypeDef SendCharToDtu(char* msg);
 HAL_StatusTypeDef SendU8ToDtu(uint8_t* msg,uint16_t len);
 
 // Description: 组织上报数据为规定格式字符串
-char* FormUploadData(uint16_t Start,uint16_t Mode_Auto,uint32_t InWaterVal,uint32_t OutWaterVal,uint32_t PosWaterPd,uint32_t NegGasPd,uint32_t InWaterFd,uint32_t OutWaterFd);
+char* FormUploadData(uint16_t Start,uint16_t Mode_Auto,uint32_t InWaterVal,uint32_t OutWaterVal,uint32_t PosWaterPd,uint32_t NegGasPd,uint32_t InWaterFd,uint32_t OutWaterFd,uint32_t PosMin,uint32_t PosMax);
 // Description: 生成包含上报数据的阿里云Alink Json
 char *FormJson(char* sendMsg);
 

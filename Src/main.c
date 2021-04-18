@@ -93,7 +93,7 @@ UART_HandleTypeDef huart3;
 #define ADC_CHANNEL_FRE  16	   // Single channel data number for average
 
 #define AdjTime   600          // 自动调节时间s，10分钟
-#define WorkTime  3600*3       // 最长运行时间s，3小时
+#define WorkTime  21600       // 最长运行时间s: 3600 * 6，6小时
 
 uint16_t adc1_val_buf[ADC_CHANNEL_CNT * ADC_CHANNEL_FRE];  // buffer for ADC DMA trans
 uint32_t adc1_aver_val[ADC_CHANNEL_CNT];
@@ -106,6 +106,8 @@ uint16_t IO1_val=0, IO2_val=0, IO3_val=0, IO4_val=0;
 
 uint16_t cnt10ms;   // 10ms计时
 uint16_t cnt1s;     // 1s计时
+
+
 uint32_t AdjTimer1s, WorkTimer1s;   // 自动调节计时，开机运行时间计时
 
 uint16_t Mode_Auto=1;   // 默认自动模式
@@ -248,8 +250,10 @@ void UART_ISR(void)
                           break;					
 				      case 'Z' :	                 // 读取状态机 
 						              TxBuffer[0] = Mstate;
-						              HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 1); 
-						              aRx_uart = '?';  // clear command byte
+													TxBuffer[1] = AdjTimer1s >>8; TxBuffer[2] = AdjTimer1s;    // 调整时间
+													TxBuffer[3] = WorkTimer1s >>8; TxBuffer[4] = WorkTimer1s;  // 工作时间
+													HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 5); 
+													aRx_uart = '?';  // clear command byte
                           break;						
 						
 				      case 'B' :	Start=1;   // 开机
@@ -267,8 +271,8 @@ void UART_ISR(void)
             							TxBuffer[2] = Sys.OutWaterVal>>8; TxBuffer[3] = Sys.OutWaterVal;   // 出水阀值
 							            TxBuffer[4] = Sys.PosMin >>8; TxBuffer[5] = Sys.PosMin;            // 自动调节最小压力
             							TxBuffer[6] = Sys.PosMax >>8; TxBuffer[7] = Sys.PosMax;            // 自动调节最大压力
-							
-							            HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 8);
+													TxBuffer[8] = Start;  TxBuffer[9] = Mode_Auto;                   // 开/关、自动/手动
+													HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 10);
 						              aRx_uart = '?';  // clear command byte
                           break;						
 						
@@ -542,13 +546,18 @@ void UART_ISR(void)
 
 extern char ReceivedJsonBuffer[];																		//下发Json缓存
 char receive_command[300];																					//抽取下发Json中的控制指令缓存
+
+char productKeyInFlash[64];
+char deviceNameInFlash[64];
+char deviceSecretInFlash[64];
+
 const char* productKey = "g34tzHdyy7Z";															//阿里云三元组productKey
 const char* deviceName = "P0000003";																//阿里云三元组deviceName
 const char* deviceSecret = "dbf892ce52c7cb2d44581b58cb119cec";			//阿里云三元组deviceSecret
 extern uint16_t RetryTime;
 extern uint32_t send_time_counter;
 extern uint8_t readyToSend;
-void UpdateStateByCommand(char* command,uint16_t* start,uint16_t* mode_Auto,uint32_t* InWaterVal,uint32_t* OutWaterVal){
+void UpdateStateByCommand(char* command,uint16_t* start,uint16_t* mode_Auto,uint32_t* InWaterVal,uint32_t* OutWaterVal,uint32_t* PosMin,uint32_t* PosMax){
 			char* ptr = NULL;
 			ptr=strtok(command,",");
 			while(ptr != NULL){
@@ -580,7 +589,7 @@ void UpdateStateByCommand(char* command,uint16_t* start,uint16_t* mode_Auto,uint
 					ptr=strtok(NULL,",");
 					uint32_t subInWaterVal = 0;
 					sscanf(ptr,"%u",&subInWaterVal);
-					if(subInWaterVal <= 1000 && *start == 0){
+					if(subInWaterVal <= 1000 && *mode_Auto == 0){
 						*InWaterVal = subInWaterVal;
 						WriteFlashNWord(0, (int*)&Sys, PARAMETER_SIZE);		// 一次写入全部参数	
 						DAC1_val = (uint16_t)((float)Sys.InWaterVal * 4.095);
@@ -590,12 +599,32 @@ void UpdateStateByCommand(char* command,uint16_t* start,uint16_t* mode_Auto,uint
 					ptr=strtok(NULL,",");
 					uint32_t subOutWaterVal = 0;
 					sscanf(ptr,"%u",&subOutWaterVal);
-					if(subOutWaterVal <= 1000 && *start == 0){
+					if(subOutWaterVal <= 1000 && *mode_Auto == 0){
 						*OutWaterVal = subOutWaterVal;
 						WriteFlashNWord(0, (int*)&Sys, PARAMETER_SIZE);		// 一次写入全部参数	
 						DAC1_val = (uint16_t)((float)Sys.OutWaterVal * 4.095);
 						HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, DAC1_val );
 					}
+				}else if(strcmp(ptr,"posmin")== 0){
+					ptr=strtok(NULL,",");
+					uint32_t pmin = 0;
+					sscanf(ptr,"%u",&pmin);
+					if(pmin >= 800 && pmin <= 1300){
+						*PosMin = pmin;
+						WriteFlashNWord(0, (int*)&Sys, PARAMETER_SIZE);		// 一次写入全部参数
+					}		
+				}else if(strcmp(ptr,"posmax")== 0){
+					ptr=strtok(NULL,",");
+					uint32_t pmax = 0;
+					sscanf(ptr,"%u",&pmax);
+					if(pmax >= 800 && pmax <= 1300){
+						*PosMax = pmax;
+						WriteFlashNWord(0, (int*)&Sys, PARAMETER_SIZE);		// 一次写入全部参数	
+					}
+				}else if(strcmp(ptr,"refresh")== 0){
+					ptr=strtok(NULL,",");
+					uint32_t trash = 0;
+					sscanf(ptr,"%u",&trash);
 				}
 				ptr=strtok(NULL,",");
 			}
@@ -604,7 +633,9 @@ void UpdateStateByCommand(char* command,uint16_t* start,uint16_t* mode_Auto,uint
 void TryToReceiveMessage(){
 	if(usart1_Process() == HAL_OK){										//从FiFo中取出一条完整的Json并存入ReceivedJsonBuffer中
 					memset(receive_command,0,sizeof(receive_command));
+					#ifdef debug
 					printf("%s \r\n",ReceivedJsonBuffer);
+					#endif
 					//解析Json数据
 					cJSON * receiveJson = cJSON_Parse(ReceivedJsonBuffer);
 					cJSON * myParams = cJSON_GetObjectItem(receiveJson,"params");
@@ -612,15 +643,56 @@ void TryToReceiveMessage(){
 					if(Pdata!= NULL){
 						//获取命令字符串
 						strcpy(receive_command,Pdata->valuestring);
+						#ifdef debug
 						printf("%s \r\n",receive_command);
+						#endif
 						//解析命令字符串且更新状态
-						UpdateStateByCommand(receive_command,&Start,&Mode_Auto,&(Sys.InWaterVal),&(Sys.OutWaterVal));
+						UpdateStateByCommand(receive_command,&Start,&Mode_Auto,&(Sys.InWaterVal),&(Sys.OutWaterVal),&(Sys.PosMin),&(Sys.PosMax));
+						#ifdef debug
 						printf("update OK !!!\r\n");
+						#endif
 					}
 					cJSON_Delete(receiveJson);
 			}
 
 }
+
+//0x0803F000
+uint8_t ReadStringFromFlash(uint32_t Address, char *ReadBuf, uint32_t MaxNum) 
+{
+    uint16_t i = 0;
+    for(i=0; i< MaxNum; i++) 
+    {
+       char sub = *(__IO uint8_t*) Address;  // read one int(word)
+				*(ReadBuf + i) = sub;
+				if(sub == '\0'){
+					return 1;
+				}
+				Address = Address + 1;   // 1 bytes
+    }
+		return 0;
+}
+
+uint8_t loadAliyunMessageFromFlash(){
+	uint32_t BaseAddress = 0x0800F000;
+	memset(productKeyInFlash,0,sizeof(productKeyInFlash));
+	memset(deviceNameInFlash,0,sizeof(deviceNameInFlash));
+	memset(deviceSecretInFlash,0,sizeof(deviceSecretInFlash));
+	if(ReadStringFromFlash(BaseAddress,deviceNameInFlash,sizeof(deviceNameInFlash) - 1) == 0)
+			return 0;
+	if(ReadStringFromFlash(BaseAddress + 64,deviceSecretInFlash,sizeof(deviceSecretInFlash) - 1) == 0)
+			return 0;
+	if(ReadStringFromFlash(BaseAddress + 64*2,productKeyInFlash,sizeof(productKeyInFlash) - 1) == 0)
+			return 0;
+	#ifdef debug
+	printf("Read Connect Message\r\n OK!\r\n");
+//	printf("Read Connect Message\r\n ERROR!\r\n");
+	printf("deviceNameInFlash: %s\r\n deviceSecretInFlash: %s\r\n productKeyInFlash: %s\r\n",deviceNameInFlash,deviceSecretInFlash,productKeyInFlash);
+	#endif
+	return 1;
+}
+
+
 
 /* USER CODE END 0 */
 
@@ -747,10 +819,11 @@ int main(void)
 		
 	  HAL_Delay(20);
 	  Mstate=0;
-			
-    printf("\n\rBEGIN Pump......\n\r"); 
+			#ifdef debug
+			printf("\n\rBEGIN Pump......\n\r"); 
 			printf("InW : %d\r\n", Sys.InWaterVal);
 			printf("OutW: %d\r\n", Sys.OutWaterVal);
+			#endif
 
   /* USER CODE END 2 */
 
@@ -760,12 +833,13 @@ int main(void)
 	dt_cnt=0;
 	for (i=0; i<4; i++) dt_avg[i]=0;
 	
-	Mode_Auto =0;   // 非自动模式
+	Mode_Auto =1;   // 自动模式
 	readyToSend = 1;//发送第一条报文
+	loadAliyunMessageFromFlash();
   while (1)
   {
 			if(RetryTime >= 30){																//距离上一次初始化30s
-				if(EstablishMqttConnection(productKey,deviceName,deviceSecret) == HAL_ERROR){			//如果初始化失败
+				if(EstablishMqttConnection(productKeyInFlash,deviceNameInFlash,deviceSecretInFlash) == HAL_ERROR){			//如果初始化失败
 					#ifdef debug
 					printf("===================\r\n");
 					printf("Init connection failed\r\n");
@@ -796,10 +870,10 @@ int main(void)
 				          Mstate=2;
 					        break;
         
-				case 2 :  if (cnt1s < 30)  break;         // 延时 30s，手动模式
+				case 2 :  if (cnt1s < 60)  break;         // 延时 60s，手动模式
 				          if (Mode_Auto==1)  Mstate=3;    // 自动模式
 				          AdjTimer1s=0;       // 自动调节计时清零
-				          cnt1s=50;           // 避免2次延时30s
+				          cnt1s=70;           // 避免2次延时60s
 				          break;
 				
 				case 3 :   // 检查阀门是否到位，反馈电压与控制电压相差不超过0.2v
@@ -817,7 +891,7 @@ int main(void)
 										   }											 
 									break;
 									
-				case 4 : 	if (cnt1s<10)  break;  // 阀门到位后，压力判断延时10s，避免调节过频繁  
+				case 4 : 	if (cnt1s<15)  break;  // 阀门到位后，压力判断延时15s，避免调节过频繁  
 					        if ((Sys.NegGasPd > NegMin)&&(Sys.NegGasPd < NegMax)&&(Sys.PosWaterPd > Sys.PosMin)&&(Sys.PosWaterPd < Sys.PosMax) )	// 压力是否正常？
 											  { 
 													Mstate=5;      // 阀门控制到位、压力正常 
@@ -858,11 +932,11 @@ int main(void)
 					        Mstate=7;
 									break;
 										
-        case 7 :  if (cnt1s<3) break;   // 调节阀门到位延时3s
+        case 7 :  if (cnt1s<5) break;   // 调节阀门到位延时5s
                   Mstate=3;
                   break;
 										
-        case 8 :  if (cnt1s<10) break;  // 阀门到位后压力判断延时10s
+        case 8 :  if (cnt1s<15) break;  // 阀门到位后压力判断延时15s
                   Mstate=4;
                   break;
 										
@@ -872,9 +946,10 @@ int main(void)
 				          break;
 				
 				case 11:  if (cnt1s < 15) break;  // 15s
-				          GATE24V_OFF;     // 关阀门电源
+				          
 //                  HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0);
 //		              HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, 0);
+									GATE24V_OFF;     // 关阀门电源
 				          MAIN_MOTOR_OFF;  // 关380v主电机
 				          GAS_OFF;         // 释放进气阀（常开）
 									Mstate=0;
@@ -903,7 +978,7 @@ int main(void)
 				
 			if ( (Start==0) && (Mstate>0) && (Mstate<10)) Mstate=10;      // 关机
 				
-			if ( WorkTimer1s > WorkTime) Mstate=10;       // 3小时自动关机
+			if ((Mstate != 0 && Mstate != 11) && WorkTimer1s > WorkTime) Mstate=10;       // 3小时自动关机
 				
       if ( (Mode_Auto==0) && (Mstate>1) && (Mstate<10)) Mstate=2;   // 手动模式
 				
@@ -982,7 +1057,7 @@ int main(void)
 
 //      printf("Mstate: %d \r\n", Mstate);	
 			if(readyToSend == 1 ){								
-				SendMessageToAliIOT(Start,Mode_Auto,Sys.InWaterVal,Sys.OutWaterVal,Sys.PosWaterPd,Sys.NegGasPd,Sys.InWaterFd,Sys.OutWaterFd);
+				SendMessageToAliIOT(Start,Mode_Auto,Sys.InWaterVal,Sys.OutWaterVal,Sys.PosWaterPd,Sys.NegGasPd,Sys.InWaterFd,Sys.OutWaterFd,Sys.PosMin,Sys.PosMax);
 				send_time_counter = 0;															//清除计时
 				readyToSend = 0;
 			}
@@ -1372,7 +1447,7 @@ static void MX_TIM6_Init(void)
   htim6.Init.Prescaler = 7200-1;
   htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim6.Init.Period = 100-1;
-  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
   {
     Error_Handler();
@@ -1410,7 +1485,7 @@ static void MX_TIM7_Init(void)
   htim7.Init.Prescaler = 7200-1;
   htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim7.Init.Period = 10000-1;
-  htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
   {
     Error_Handler();
