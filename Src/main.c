@@ -100,6 +100,7 @@ uint32_t adc1_aver_val[ADC_CHANNEL_CNT];
 
 uint16_t Start=0;   // 开关机命令
 uint16_t Mstate=0;  // 主状态机
+uint16_t shutDownCode = 0;				//关机代码
 
 uint16_t DAC1_val=0, DAC2_val=0;
 uint16_t IO1_val=0, IO2_val=0, IO3_val=0, IO4_val=0;
@@ -252,7 +253,8 @@ void UART_ISR(void)
 						              TxBuffer[0] = Mstate;
 													TxBuffer[1] = AdjTimer1s >>8; TxBuffer[2] = AdjTimer1s;    // 调整时间
 													TxBuffer[3] = WorkTimer1s >>8; TxBuffer[4] = WorkTimer1s;  // 工作时间
-													HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 5); 
+													TxBuffer[5] = shutDownCode;
+													HAL_UART_Transmit_IT(&PCUart,(uint8_t*)TxBuffer, 6);  
 													aRx_uart = '?';  // clear command byte
                           break;						
 						
@@ -887,6 +889,7 @@ int main(void)
 											   Mstate=7;      // 延时3秒再判
 											   if (AdjTimer1s > AdjTime) {   // 自动调节10分钟 
 													   Mstate =10;         // 自动关机
+														 shutDownCode = 1;
 												   }
 										   }											 
 									break;
@@ -900,9 +903,16 @@ int main(void)
 												{
 													Mstate=6;      // 压力不正常，进行自动调节
 													if ( (Sys.NegGasPd>1200) ||(Sys.NegGasPd<800) || (Sys.PosWaterPd>1500)||(Sys.PosWaterPd<400))
-													  { Mstate =10;     // 压力超限，自动关机。负压正常在1000~1100，水压正常在800~1300
+													  { 
+															if((Sys.NegGasPd>1200) ||(Sys.NegGasPd<800)){
+																shutDownCode = 2;
+															}else{
+																shutDownCode = 3;
+															}
+															Mstate =10;     // 压力超限，自动关机。负压正常在1000~1100，水压正常在800~1300
 													  }
 											    if (AdjTimer1s > AdjTime) { // 自动调节10分钟 
+															shutDownCode = 4;
 													    Mstate =10;             // 自动关机
 													  }
 												}	
@@ -976,9 +986,15 @@ int main(void)
 				 }
 			  }
 				
-			if ( (Start==0) && (Mstate>0) && (Mstate<10)) Mstate=10;      // 关机
+			if ( (Start==0) && (Mstate>0) && (Mstate<10)){ 
+					shutDownCode = 0;
+					Mstate=10;  
+			}   // 关机
 				
-			if ((Mstate != 0 && Mstate != 11) && WorkTimer1s > WorkTime) Mstate=10;       // 3小时自动关机
+			if ((Mstate != 0 && Mstate != 11) && WorkTimer1s > WorkTime){ 
+				shutDownCode = 5;
+				Mstate=10;       // 3小时自动关机
+				}
 				
       if ( (Mode_Auto==0) && (Mstate>1) && (Mstate<10)) Mstate=2;   // 手动模式
 				
