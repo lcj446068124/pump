@@ -895,8 +895,9 @@ int main(void)
 									break;
 									
 				case 4 : 	if (cnt1s<15)  break;  // 阀门到位后，压力判断延时15s，避免调节过频繁  
-					        if ((Sys.NegGasPd > NegMin)&&(Sys.NegGasPd < NegMax)&&(Sys.PosWaterPd > Sys.PosMin)&&(Sys.PosWaterPd < Sys.PosMax) )	// 压力是否正常？
+					        if ((Sys.NegGasPd >= NegMin)&&(Sys.NegGasPd <= NegMax)&&(Sys.PosWaterPd >= Sys.PosMin)&&(Sys.PosWaterPd <= Sys.PosMax) )	// 压力是否正常？
 											  { 
+													AdjTimer1s=0;    // 正常状态，自动调节总计时清零
 													Mstate=5;      // 阀门控制到位、压力正常 
 												}
 											else
