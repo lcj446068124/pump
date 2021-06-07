@@ -116,8 +116,8 @@ uint16_t Mode_Auto=1;   // 默认自动模式
 volatile int16_t NTCTemperature;  // Temperature convert from ADC value
 int32_t iTemp, iHumi;
 
-#define NegMin  900  // 9mA，-0.04KP
-#define NegMax  1100 // 11mA，-0.02KP
+#define NegMin  500  // 5mA，-0.04KP
+#define NegMax  1200 // 12mA，-0.02KP
 //#define PosMin  840  // 8.4mA，0.5MP
 //#define PosMax  880  // 8.8mA，0.6MP
 #define ConDlt  300  // 阀门控制电压与实际反馈电压的最大差值，300-->0.3v
@@ -903,9 +903,9 @@ int main(void)
 											else
 												{
 													Mstate=6;      // 压力不正常，进行自动调节
-													if ( (Sys.NegGasPd>1200) ||(Sys.NegGasPd<800) || (Sys.PosWaterPd>1500)||(Sys.PosWaterPd<400))
+													if ( (Sys.NegGasPd>NegMax) ||(Sys.NegGasPd<NegMin) || (Sys.PosWaterPd>1500)||(Sys.PosWaterPd<400))
 													  { 
-															if((Sys.NegGasPd>1200) ||(Sys.NegGasPd<800)){
+															if((Sys.NegGasPd>NegMax) ||(Sys.NegGasPd<NegMin)){
 																shutDownCode = 2;
 															}else{
 																shutDownCode = 3;
